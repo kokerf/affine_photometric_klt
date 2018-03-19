@@ -51,11 +51,11 @@ void LKTInvoker::operator()(const Range &range) const
     {
         const Patch &patch = prevPatches[ptidx];
         const Mat &T = patch.patchPyr[level];
-        const Mat &Hinv = patch.Hinv[level];
+        const Mat &H = patch.Hessian[level];
         const Mat &Jcache = patch.Jcache[level];
 
         assert(T.type() == CV_32FC1);
-        assert(Hinv.type() == CV_32FC1);
+        assert(H.type() == CV_32FC1);
         assert(Jcache.type() == CV_32FC1);
         const Size2i winSize(T.cols, T.rows);
         assert(T.cols % 2 == 1 && T.rows % 2 == 1);
@@ -96,10 +96,10 @@ void LKTInvoker::operator()(const Range &range) const
         }
 
 
-        Map<const Matrix<float, Dynamic, Dynamic, RowMajor> > eigHinv(Hinv.ptr<float>(0), Hinv.rows, Hinv.cols);
+        Map<const Matrix<float, Dynamic, Dynamic, RowMajor> > eigH(H.ptr<float>(0), H.rows, H.cols);
         Map<const Matrix<float, Dynamic, Dynamic, RowMajor> > eigJcache(Jcache.ptr<float>(0), Jcache.rows, Jcache.cols);
-        CV_Assert(Hinv.cols == Hinv.rows);
-        CV_Assert(Hinv.cols == Jcache.cols);
+        CV_Assert(H.cols == H.rows);
+        CV_Assert(H.cols == Jcache.cols);
         CV_Assert(Jcache.rows == winSize.area());
 
         const int stepI = (int) (I.step / I.elemSize1());
@@ -111,6 +111,7 @@ void LKTInvoker::operator()(const Range &range) const
 //        cv::waitKey(0);
 
         Vector8f prevDelta;
+        float preRes = std::numeric_limits<float>::max();
         int j;
         for(j = 0; j < maxIter; j++)
         {
@@ -147,10 +148,11 @@ void LKTInvoker::operator()(const Range &range) const
 //            cv::waitKey(0);
 
             Vector8f Jres; Jres.setZero();
+            Vector8f delta;
             int n = 0;
             int r, c;
             int vy, vx;
-            float res_sum = 0;
+            float res = 0;
             for(r = 0; r < winSize.height; ++r)
             {
                 const float *Tptr = T.ptr<float>(r);
@@ -163,8 +165,8 @@ void LKTInvoker::operator()(const Range &range) const
                                     affine[2]*vx + affine[3]*vy + nextPt[1]);
                     Vector2i iwarpPt = warpPt.cast<int>();
 
-                    if(iwarpPt[0] < -winSize.width || iwarpPt[1] < -winSize.height ||
-                        iwarpPt[0] >= I.cols + winSize.width || iwarpPt[1] >= I.rows + winSize.height)
+                    if(iwarpPt[0] < 0|| iwarpPt[1] < 0 ||
+                        iwarpPt[0] >= I.cols || iwarpPt[1] >= I.rows)
                     {
                         continue;
                     }
@@ -181,47 +183,50 @@ void LKTInvoker::operator()(const Range &range) const
 
                         float diff = (1+alpha) * (Iptr[0] * iw00 + Iptr[1] * iw01 + Iptr[stepI] * iw10 + Iptr[1+stepI] * iw11) + beta - Tptr[c];
 
+                        res += diff * diff;
                         Jres.noalias() += eigJcache.row(n) * diff;
                     }
                 }
             }
 
-            Vector8f delta = eigHinv * Jres;
+            delta = eigH.ldlt().solve(Jres);
 
             Matrix2f dA;
             dA << delta[0] + 1.f, delta[1], delta[2], delta[3] + 1.f;
 
             Matrix2f dAinv = dA.inverse();
 
-            dAinv.setIdentity();
+//            dAinv.setIdentity();
 
             Map<Matrix2f> A(affine.data());
-
-//            std::cout << j << "delta: " << delta.transpose() << std::endl;
-//            std::cout << "A:\n" << A << "\ninv:\n" << dAinv << std::endl;
-//            std::cout << "A*dAinv\n" << A*dAinv << std::endl;
 
             A = A*dAinv;
             nextPt -= dAinv * Vector2f(delta[4],delta[5]);
             beta -= (alpha+1)*delta[7];
             alpha /= (delta[6]+1);
 
-            nextPts[ptidx] = nextPt;
-            nextAffines[ptidx] << affine[0]-1.0f, affine[1], affine[2], affine[3]-1.0f;
-            nextIllums[ptidx] << alpha, beta;
+//            std::cout << j << ", res: " << res/winSize.area() << "， delta: " << delta.transpose() << std::endl;
+//            std::cout << "A:\n" << A << std::endl;
+//            std::cout << "pt: " << nextPt.transpose() << ", b: " << beta << ", a: " << alpha << std::endl;
 
-            if(delta.dot(delta) <= minEpslion)
+            if(delta[4]*delta[4] + delta[5]*delta[5] <= minEpslion)
                 break;
 
             if(j > 0 && std::abs(delta[4] + prevDelta[4]) < 0.01 &&
                 std::abs(delta[5] + prevDelta[5]) < 0.01)
             {
-//                nextPts[ptidx] -= delta * 0.5f;
+                nextPts[ptidx][0] -= delta[4] * 0.5f;
+                nextPts[ptidx][1] -= delta[5] * 0.5f;
                 break;
             }
-            prevDelta = delta;
 
+            prevDelta = delta;
+            preRes = res;
         }
+
+        nextPts[ptidx] = nextPt;
+        nextAffines[ptidx] << affine[0]-1.0f, affine[1], affine[2], affine[3]-1.0f;
+        nextIllums[ptidx] << alpha, beta;
     }
 }
 
@@ -246,18 +251,19 @@ void HessianInvoker::operator()(const Range &range) const
         Patch &patch = patches[ptidx];
         if(patch.patchPyr.size() != maxLevel)
             patch.patchPyr.resize(maxLevel+1);
-        if(patch.Hinv.size() != maxLevel)
-            patch.Hinv.resize(maxLevel+1);
+        if(patch.Hessian.size() != maxLevel)
+            patch.Hessian.resize(maxLevel+1);
         if(patch.Jcache.size() != maxLevel)
             patch.Jcache.resize(maxLevel+1);
 
         Mat &T = patch.patchPyr[level];
-        Mat &Hinv = patch.Hinv[level];
+        Mat &H = patch.Hessian[level];
         Mat &Jcache = patch.Jcache[level];
 
         T = Mat::zeros(winSize, CV_32FC1);
+        H = Mat::zeros(8, 8, CV_32FC1);
         Jcache= Mat::zeros(winSize.area(), 8, CV_32FC1);
-        Matrix<float, 8, 8, RowMajor> H;
+        Map<Matrix<float, 8, 8, RowMajor> > eigH((float*)H.data, 8, 8);
         Map<Matrix<float, Dynamic, Dynamic, RowMajor> > eigJcache((float*)Jcache.data, winSize.area(), 8);
 
         Vector2i iptLevel;
@@ -277,7 +283,6 @@ void HessianInvoker::operator()(const Range &range) const
         int x, y;
         int i = 0;
         Vector8f J;
-        H.setZero();
         for(y = 0; y < winSize.height; ++y)
         {
             const uchar *pI = Tsrc.ptr<uchar>(y + iptLevel[1]) + iptLevel[0];
@@ -293,15 +298,10 @@ void HessianInvoker::operator()(const Range &range) const
 
                 J << x * dx, y * dx, x * dy, y * dy, dx, dy, pP[x], 1;
 
-                H.noalias() += J * J.transpose();
+                eigH.noalias() += J * J.transpose();
                 eigJcache.row(i) = J;
             }
-
         }
-
-        Hinv = Mat::zeros(8, 8, CV_32FC1);
-        Map<Matrix<float, 8, 8, RowMajor> > eigHinv(Hinv.ptr<float>(0));
-        eigHinv = H.inverse();
     }
 }
 

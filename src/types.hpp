@@ -8,7 +8,7 @@ namespace KLT_Tracker{
 
 struct Patch{
     std::vector<cv::Mat> patchPyr;
-    std::vector<cv::Mat> Hinv;
+    std::vector<cv::Mat> Hessian;
     std::vector<cv::Mat> Jcache;
 };
 
