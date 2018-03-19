@@ -6,14 +6,13 @@
 #include <opencv2/video/tracking.hpp>
 #include <Eigen/Dense>
 #include "klt.hpp"
-#include "types.hpp"
 
+#include <opencv2/highgui.hpp>
+#include <iostream>
 
 namespace KLT_Tracker{
 
-LKTInvoker::LKTInvoker(const Mat *_prevPatch,
-                       const Mat *_prevHessian, //! inv hessian
-                       const Mat *_prevJacobian,
+LKTInvoker::LKTInvoker(const Patch *_prevPatches,
                        const Mat &_nextImg,
                        const Vector2f *_prevPts,
                        Vector2f *_nextPts,
@@ -27,9 +26,7 @@ LKTInvoker::LKTInvoker(const Mat *_prevPatch,
                        float _minEpslion,
                        int _flags,
                        float _maxResThreshold) :
-    prevPatch(_prevPatch),
-    prevHessian(_prevHessian),
-    prevJacobian(_prevJacobian),
+    prevPatches(_prevPatches),
     nextImg(&_nextImg),
     prevPts(_prevPts),
     nextPts(_nextPts),
@@ -52,10 +49,12 @@ void LKTInvoker::operator()(const Range &range) const
 
     for(int ptidx = range.start; ptidx < range.end; ptidx++)
     {
-        const Mat &T = prevPatch[ptidx];
-        const Mat &Hinv = prevHessian[ptidx];
-        const Mat &Jcache = prevJacobian[ptidx];
-        assert(T.type() == CV_8UC1);
+        const Patch &patch = prevPatches[ptidx];
+        const Mat &T = patch.patchPyr[level];
+        const Mat &Hinv = patch.Hinv[level];
+        const Mat &Jcache = patch.Jcache[level];
+
+        assert(T.type() == CV_32FC1);
         assert(Hinv.type() == CV_32FC1);
         assert(Jcache.type() == CV_32FC1);
         const Size2i winSize(T.cols, T.rows);
@@ -81,8 +80,8 @@ void LKTInvoker::operator()(const Range &range) const
             else
             {
                 nextPt = prevPt;
-                affine << 1.0, 0.0, 1.0, 0,0;
-                alpha = 1.0f;
+                affine << 1.0f, 0.0f, 0.0f, 1.0f;
+                alpha = 0.0f;
                 beta = 0.0f;
             }
         }
@@ -91,7 +90,7 @@ void LKTInvoker::operator()(const Range &range) const
             nextPt = nextPts[ptidx] * 2.f;
             affine = nextAffines[ptidx];
             affine[0] += 1.0f;
-            affine[2] += 1.0f;
+            affine[3] += 1.0f;
             alpha = nextIllums[ptidx][0];
             beta = nextIllums[ptidx][1];
         }
@@ -99,11 +98,17 @@ void LKTInvoker::operator()(const Range &range) const
 
         Map<const Matrix<float, Dynamic, Dynamic, RowMajor> > eigHinv(Hinv.ptr<float>(0), Hinv.rows, Hinv.cols);
         Map<const Matrix<float, Dynamic, Dynamic, RowMajor> > eigJcache(Jcache.ptr<float>(0), Jcache.rows, Jcache.cols);
-        assert(Hinv.cols == Hinv.rows);
-        assert(Hinv.cols == Jcache.cols);
-        assert(Jcache.rows == winSize.area());
+        CV_Assert(Hinv.cols == Hinv.rows);
+        CV_Assert(Hinv.cols == Jcache.cols);
+        CV_Assert(Jcache.rows == winSize.area());
 
         const int stepI = (int) (I.step / I.elemSize1());
+
+//        std::cout << "prevPt" << prevPt << std::endl;
+//        std::cout << "nextPt" << nextPt << std::endl;
+//
+//        cv::imshow("I", I);
+//        cv::waitKey(0);
 
         int j;
         for(j = 0; j < maxIter; j++)
@@ -124,14 +129,29 @@ void LKTInvoker::operator()(const Range &range) const
             }
 
 
+//            Mat dest;
+//            cv::cvtColor(I, dest, CV_GRAY2RGB);
+//            Point2f lt(nextPt[0]+affine[0]*(-halfWin[0]-1)+affine[1]*(-halfWin[0]-1), nextPt[1]+affine[2]*(-halfWin[0]-1)+affine[3]*(-halfWin[0]-1));
+//            Point2f rt(nextPt[0]+affine[0]*(halfWin[0]+1)+affine[1]*(-halfWin[0]-1), nextPt[1]+affine[2]*(halfWin[0]+1)+affine[3]*(-halfWin[0]-1));
+//            Point2f lb(nextPt[0]+affine[0]*(-halfWin[0]-1)+affine[1]*(halfWin[0]+1), nextPt[1]+affine[2]*(-halfWin[0]-1)+affine[3]*(+halfWin[0]+1));
+//            Point2f rb(nextPt[0]+affine[0]*(halfWin[0]+1)+affine[1]*(halfWin[0]+1), nextPt[1]+affine[2]*(halfWin[0]+1)+affine[3]*(halfWin[0]+1));
+//            cv::line(dest, lt, rt, cv::Scalar(255,0,0));
+//            cv::line(dest, rt, rb, cv::Scalar(255,0,0));
+//            cv::line(dest, rb, lb, cv::Scalar(255,0,0));
+//            cv::line(dest, lb, lt, cv::Scalar(255,0,0));
+//            cv::imshow("dest", dest);
+//            Mat src;
+//            T.convertTo(src, CV_8UC1);
+//            cv::waitKey(0);
+
             Vector8f Jres; Jres.setZero();
             int n = 0;
             int r, c;
             int vy, vx;
+            float res_sum = 0;
             for(r = 0; r < winSize.height; ++r)
             {
-                const uchar *Tptr = T.ptr<uchar>(r);
-                const uchar *Iptr = I.ptr<uchar>(r + inextPt[1]) + inextPt[0];
+                const float *Tptr = T.ptr<float>(r);
 
                 vy = r-halfWin[1];
                 for(c = 0; c < winSize.width; ++c, ++n)
@@ -148,39 +168,62 @@ void LKTInvoker::operator()(const Range &range) const
                     }
                     else
                     {
+                        const uchar *Iptr = I.ptr<uchar>(iwarpPt[1]) + iwarpPt[0];
+
                         float a = warpPt[0] - iwarpPt[0];
                         float b = warpPt[1] - iwarpPt[1];
-                        float iw00 = cvRound((1.f - a) * (1.f - b));
-                        float iw01 = cvRound(a * (1.f - b));
-                        float iw10 = cvRound((1.f - a) * b);
+                        float iw00 = (1.f - a) * (1.f - b);
+                        float iw01 = a * (1.f - b);
+                        float iw10 =(1.f - a) * b;
                         float iw11 = 1 - iw00 - iw01 - iw10;
 
-                        float diff = alpha * (Iptr[c] * iw00 + Iptr[c+1] * iw01 + Iptr[c+stepI] * iw10 + Iptr[c+stepI] * iw11) + beta - (float)Tptr[c];
+                        float diff = (1+alpha) * (Iptr[0] * iw00 + Iptr[1] * iw01 + Iptr[stepI] * iw10 + Iptr[1+stepI] * iw11) + beta - Tptr[c];
+
+                        res_sum += diff*diff;
+
                         Jres.noalias() += eigJcache.row(n) * diff;
                     }
                 }
             }
 
+
+//            std::cout << res_sum << ", Jres: " << Jres.transpose() << std::endl;
+
             Vector8f delta = eigHinv * Jres;
 
-            float dA11 = delta[0] + 1.f;
-            float dA12 = delta[1];
-            float dA22 = delta[2] + 1.f;
-            float dA21 = delta[3];
+            Matrix2f dA;
+            dA << delta[0] + 1.f, delta[1], delta[2], delta[3] + 1.f;
 
-            float D =  dA11 * dA22 - dA12 * dA12;
+            Matrix2f dAinv = dA.inverse();
 
-            Matrix2f dAinv; dAinv << dA22/D, -dA21/D, dA12/D, dA11/D;
+            dAinv.setIdentity();
+
             Map<Matrix2f> A(affine.data());
+
+//            std::cout << j << "delta: " << delta.transpose() << std::endl;
+//            std::cout << "A:\n" << A << "\ninv:\n" << dAinv << std::endl;
+//            std::cout << "A*dAinv\n" << A*dAinv << std::endl;
 
             A = A*dAinv;
             nextPt -= dAinv * Vector2f(delta[4],delta[5]);
-            beta -= (alpha+1)/delta[7];
+            beta -= (alpha+1)*delta[7];
             alpha /= (delta[6]+1);
 
             nextPts[ptidx] = nextPt;
-            nextAffines[ptidx] << affine[0]-1.0f, affine[1], affine[2]-1.0f, affine[3];
+            nextAffines[ptidx] << affine[0]-1.0f, affine[1], affine[2], affine[3]-1.0f;
             nextIllums[ptidx] << alpha, beta;
+
+//            Mat dest;
+//            cv::cvtColor(I, dest, CV_GRAY2RGB);
+//            Point2f lt(nextPt[0]-halfWin[0]-1, nextPt[1]-halfWin[0]-1);
+//            Point2f rb(nextPt[0]+halfWin[0]+1, nextPt[1]+halfWin[0]+1);
+//            cv::rectangle(dest, lt, rb, cv::Scalar(255,0,0));
+//            cv::imshow("dest", dest);
+//            Mat src;
+//            T.convertTo(src, CV_8UC1);
+//            cv::imshow("src", src);
+//
+//            waitKey(0);
 
             if(delta.dot(delta) <= minEpslion)
                 break;
@@ -189,50 +232,62 @@ void LKTInvoker::operator()(const Range &range) const
     }
 }
 
-void getOpticalFlowPyramidPatch(const std::vector<cv::Point2f> &pts, const cv::Mat &img, std::vector<Patch> &pathes, Size winSize, int maxLevel)
+void getOpticalFlowPyramidPatch(InputArray _pts, const std::vector<cv::Mat> &imgPyr, std::vector<Patch> &pathes, Size winSize, int maxLevel)
 {
+    Mat ptsMat = _pts.getMat();
+    int npoints;
+    CV_Assert((npoints = ptsMat.checkVector(2, CV_32F, true)) >= 0);
+
     assert(winSize.height%2 == 1 && winSize.width%2 == 1);
-    const cv::Point2i halfwin((winSize.width-1)*0.5, (winSize.width-1)*0.5);
+    const cv::Point2f halfwin((winSize.width-1)*0.5, (winSize.width-1)*0.5);
 
-    std::vector<cv::Mat> imgPyr;
-    cv::buildOpticalFlowPyramid(img, imgPyr, winSize, maxLevel, false);
-
-    std::vector<cv::Mat> derivXPyr(imgPyr.size());
-    std::vector<cv::Mat> derivYPyr(imgPyr.size());
+    std::vector<Mat> derivXPyr(imgPyr.size());
+    std::vector<Mat> derivYPyr(imgPyr.size());
     for(int l = 0; l <= maxLevel; ++l)
     {
-        Size imgSize = imgPyr[l].size();
-        derivXPyr[l].resize(imgSize.height + winSize.height*2, imgSize.width + winSize.height*2);
-        derivYPyr[l].resize(imgSize.height + winSize.height*2, imgSize.width + winSize.height*2);
+        Size wholeSize;
+        Point ofs;
+        imgPyr[l].locateROI(wholeSize, ofs);
+        CV_Assert(ofs.x == winSize.width && ofs.y == winSize.height);
+        CV_Assert(wholeSize.width == imgPyr[l].cols + 2*winSize.width && wholeSize.height == imgPyr[l].rows + 2*winSize.height);
 
-        cv::Mat derivX = derivXPyr[l](Rect(winSize.width, winSize.height, imgSize.width, imgSize.height));
-        cv::Mat derivY = derivYPyr[l](Rect(winSize.width, winSize.height, imgSize.width, imgSize.height));
-        cv::Scharr(imgPyr[l], derivXPyr[l], CV_32FC1, 1, 0, 1, 0);
-        cv::Scharr(imgPyr[l], derivYPyr[l], CV_32FC1, 0, 1, 1, 0);
-        cv::copyMakeBorder(derivX, derivXPyr[l], winSize.height, winSize.height, winSize.width, winSize.width, cv::BORDER_CONSTANT | cv::BORDER_ISOLATED);
-        cv::copyMakeBorder(derivY, derivYPyr[l], winSize.height, winSize.height, winSize.width, winSize.width, cv::BORDER_CONSTANT | cv::BORDER_ISOLATED);
+        Size imgSize = imgPyr[l].size();
+        derivXPyr[l] = Mat::zeros(imgSize.height + winSize.height*2, imgSize.width + winSize.height*2, CV_32FC1);
+        derivYPyr[l] = Mat::zeros(imgSize.height + winSize.height*2, imgSize.width + winSize.height*2, CV_32FC1);
+
+        Mat derivX = derivXPyr[l](Rect(winSize.width, winSize.height, imgSize.width, imgSize.height));
+        Mat derivY = derivYPyr[l](Rect(winSize.width, winSize.height, imgSize.width, imgSize.height));
+        const double scale = 1.0/32;
+        Scharr(imgPyr[l], derivX, CV_32FC1, 1, 0, scale, 0);
+        Scharr(imgPyr[l], derivY, CV_32FC1, 0, 1, scale, 0);
+        copyMakeBorder(derivX, derivXPyr[l], winSize.height, winSize.height, winSize.width, winSize.width, cv::BORDER_CONSTANT | cv::BORDER_ISOLATED);
+        copyMakeBorder(derivY, derivYPyr[l], winSize.height, winSize.height, winSize.width, winSize.width, cv::BORDER_CONSTANT | cv::BORDER_ISOLATED);
+
+        derivXPyr[l].adjustROI(-winSize.height, -winSize.height, -winSize.width, -winSize.width);
+        derivYPyr[l].adjustROI(-winSize.height, -winSize.height, -winSize.width, -winSize.width);
     }
 
-    const size_t N = pts.size();
-    pathes.resize(N);
+    const Point2f *pts = ptsMat.ptr<Point2f>();
+    pathes.resize(npoints);
     const cv::Point2f offset(winSize.height, winSize.width);
-    for(size_t n = 0; n < N; ++n)
+    for(size_t n = 0; n < npoints; ++n)
     {
-        std::vector<cv::Mat> patches(maxLevel+1);
-        std::vector<cv::Mat> Hessians(maxLevel+1);
-        std::vector<cv::Mat> Jcaches(maxLevel+1);
+        std::vector<Mat> patches(maxLevel+1);
+        std::vector<Mat> Hessians(maxLevel+1);
+        std::vector<Mat> Jcaches(maxLevel+1);
         const cv::Point2f pt = pts[n];
         for(int l = 0; l <= maxLevel; ++l)
         {
-            const cv::Point2f ptLevel = pt * (1.0f / (1 << l));
-            patches[l] = cv::Mat::zeros(winSize, CV_32FC1);
-            Jcaches[l] = cv::Mat::zeros(winSize.area(), 8, CV_32FC1);
+            cv::Point2f ptLevel = pt * (1.0f / (1 << l));
+            patches[l] = Mat::zeros(winSize, CV_32FC1);
+            Jcaches[l] = Mat::zeros(winSize.area(), 8, CV_32FC1);
             Matrix<float, 8, 8, RowMajor> H;
             Map<Matrix<float, Dynamic, Dynamic, RowMajor> > Jcache((float*)Jcaches[l].data, winSize.area(), 8);
 
             cv::Point2i iptLevel;
-            iptLevel.x = cvRound(ptLevel.x - halfwin.x);
-            iptLevel.y = cvRound(ptLevel.y - halfwin.y);
+            ptLevel -= halfwin;
+            iptLevel.x = cvRound(ptLevel.x);
+            iptLevel.y = cvRound(ptLevel.y);
 
             float a = ptLevel.x - iptLevel.x;
             float b = ptLevel.y - iptLevel.y;
@@ -244,21 +299,23 @@ void getOpticalFlowPyramidPatch(const std::vector<cv::Point2f> &pts, const cv::M
             const int stepI = (int)(imgPyr[l].step / imgPyr[l].elemSize1());
 
             int x, y;
-            float u = ptLevel.x - halfwin.x;
-            float v = ptLevel.y - halfwin.y;
             int i = 0;
             Vector8f J;
-            for(y = 0; y < winSize.height; ++y, ++v)
+            H.setZero();
+            for(y = 0; y < winSize.height; ++y)
             {
                 const uchar *pI = imgPyr[l].ptr<uchar>(y + iptLevel.y) + iptLevel.x;
                 const float *pdIx = derivXPyr[l].ptr<float>(y + iptLevel.y) + iptLevel.x;
                 const float *pdIy = derivYPyr[l].ptr<float>(y + iptLevel.y) + iptLevel.x;
-                float *pP = patches[l].ptr<float>(0);
+                float *pP = patches[l].ptr<float>(y);
 
-                for(x = 0; x < winSize.width; ++x, ++u, ++i)
+                for(x = 0; x < winSize.width; ++x, ++i)
                 {
                     pP[x] = pI[x] * iw00 + pI[x + 1] * iw01 + pI[x + stepI] * iw10 + pI[x + stepI + 1] * iw11;
-                    J << u * pdIx[x], v * pdIx[x], u * pdIy[x], v * pdIy[x], pdIx[x], pdIy[x], pI[x], 1;
+                    float dx = pdIx[x] * iw00 + pdIx[x + 1] * iw01 + pdIx[x + stepI] * iw10 + pdIx[x + stepI + 1] * iw11;
+                    float dy = pdIy[x] * iw00 + pdIy[x + 1] * iw01 + pdIy[x + stepI] * iw10 + pdIy[x + stepI + 1] * iw11;
+
+                    J << x * dx, y * dx, x * dy, y * dy, dx, dy, pP[x], 1;
 
                     H.noalias() += J * J.transpose();
                     Jcache.row(i) = J;
@@ -269,15 +326,118 @@ void getOpticalFlowPyramidPatch(const std::vector<cv::Point2f> &pts, const cv::M
             Hessians[l] = cv::Mat(8, 8, CV_32FC1);
             Map<Matrix<float, 8, 8, RowMajor> > Hinv(Hessians[l].ptr<float>(0));
             Hinv = H.inverse();
+
+
+//            std::cout << "pt: " << pt << "patch: \n" << patches[l] << ", l " << ptLevel<< std::endl;
+//            Mat src;
+//            cv::cvtColor(imgPyr[l], src, CV_GRAY2RGB);
+//            cv::rectangle(src, ptLevel-Point2f(1,1), ptLevel+halfwin*2+Point2f(1,1), cv::Scalar(255,0,0));
+//            cv::imshow("imgPyr", src);
+//            Mat temp;
+//            patches[l].convertTo(temp, CV_8UC1);
+//            imshow("patch", temp);
+//            waitKey(0);
         }
 
         pathes[n].patchPyr = patches;
         pathes[n].Hinv = Hessians;
         pathes[n].Jcache = Jcaches;
+
+//        if(n == 1)
+//        {
+//            std::cout << "pt: " << pt << "patch: \n" << patches[0] << std::endl;
+//            cv::Mat temp;
+//            patches[maxLevel].convertTo(temp, CV_8UC1);
+//            cv::imshow("patches[maxLevel]", temp);
+//            cv::waitKey(0);
+//        }
     }
 
 }
 
+void affinePhotometricPyrLKT(const Mat &prevImg, const Mat & nextImg,
+                             InputArray _prevPts, InputOutputArray _nextPts,
+                             OutputArray _status, OutputArray _err,
+                             Size winSize, int maxLevel, int maxIter, float minEpslion,
+                             int flags, double maxResThreshold)
+{
+    CV_Assert(maxLevel >= 0 && winSize.width > 2 && winSize.width % 2 == 1 && winSize.height > 2 && winSize.height % 2 == 1);
 
+    int level = 0, i, npoints;
+    Mat prevPtsMat = _prevPts.getMat();
+    CV_Assert((npoints = prevPtsMat.checkVector(2, CV_32F, true)) >= 0);
+
+    if(npoints == 0)
+    {
+        _nextPts.release();
+        _status.release();
+        _err.release();
+        return;
+    }
+
+    if(!(flags & USE_INITIAL_FLOW))
+        _nextPts.create(prevPtsMat.size(), prevPtsMat.type(), -1, true);
+
+    Mat nextPtsMat = _nextPts.getMat();
+    if(flags & USE_INITIAL_FLOW)
+        CV_Assert(nextPtsMat.checkVector(2, CV_32F, true) == npoints);
+
+    const Point2f *prevPts = prevPtsMat.ptr<Point2f>();
+    Point2f *nextPts = nextPtsMat.ptr<Point2f>();
+
+    _status.create((int) npoints, 1, CV_8U, -1, true);
+    Mat statusMat = _status.getMat(), errMat;
+    CV_Assert(statusMat.isContinuous());
+    uchar *status = statusMat.ptr();
+    float *err = 0;
+
+    for(i = 0; i < npoints; i++)
+        status[i] = true;
+
+    if(_err.needed())
+    {
+        _err.create((int) npoints, 1, CV_32F, -1, true);
+        errMat = _err.getMat();
+        CV_Assert(errMat.isContinuous());
+        err = errMat.ptr<float>();
+    }
+
+    if(_err.needed())
+    {
+        _err.create((int) npoints, 1, CV_32F, -1, true);
+        errMat = _err.getMat();
+        CV_Assert(errMat.isContinuous());
+        err = errMat.ptr<float>();
+    }
+
+    std::vector<Mat> prevPyr, nextPyr;
+    int maxLevel1 = buildOpticalFlowPyramid(prevImg, prevPyr, winSize, maxLevel, false);
+    int maxLevel2 = buildOpticalFlowPyramid(nextImg, nextPyr, winSize, maxLevel, false);
+    CV_Assert(maxLevel1 == maxLevel2);
+    maxLevel = maxLevel1;
+
+    maxIter = std::min(std::max(maxIter, 0), 100);
+    minEpslion = std::min(std::max(minEpslion, 0.f), 10.f);
+    minEpslion *= minEpslion;
+
+    std::vector<Patch> prevPatches;
+    getOpticalFlowPyramidPatch(_prevPts, prevPyr, prevPatches, winSize, maxLevel);
+
+    Mat nextAffines = Mat::zeros(npoints, 8, CV_32FC1);
+    Mat nextIllums = Mat::zeros(npoints, 2, CV_32FC1);
+
+    for(level = maxLevel; level >= 0; level--)
+    {
+
+        parallel_for_(Range(0, npoints), LKTInvoker(prevPatches.data(), nextPyr[level],
+                                                    (Vector2f*)prevPts, (Vector2f*)nextPts,
+                                                    (Vector4f*)nextAffines.data,
+                                                    (Vector2f*)nextIllums.data,
+                                                    status, err, level, maxLevel, maxIter, minEpslion, flags, maxResThreshold));
+
+
+    }
+
+}
 
 }

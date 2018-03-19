@@ -1,5 +1,8 @@
 #pragma once
 
+#include <Eigen/Dense>
+#include "types.hpp"
+
 namespace KLT_Tracker
 {
 
@@ -21,16 +24,14 @@ typedef Matrix<float, 8, 8, RowMajor> Matrix8f;
 struct LKTInvoker : ParallelLoopBody
 {
 
-    LKTInvoker(const Mat *_prevPatch, const Mat *_prevHessian, const Mat *_prevJacobian, const Mat &_nextImg,
+    LKTInvoker(const Patch *_patches, const Mat &_nextImg,
                const Vector2f *_prevPts, Vector2f *_nextPts, Vector4f *_nextAffines, Vector2f *_nextIllums,
                uchar *_status, float *_err, int _level, int _maxLevel,
                int _maxIter, float _minEpslion, int _flags, float _maxResThreshold);
 
     void operator()(const Range &range) const;
 
-    const Mat *prevPatch;
-    const Mat *prevHessian;
-    const Mat *prevJacobian;
+    const Patch *prevPatches;
     const Mat *nextImg;
     const Vector2f *prevPts;
     Vector2f *nextPts;
@@ -45,5 +46,14 @@ struct LKTInvoker : ParallelLoopBody
     int flags;
     float maxResThreshold;
 };
+
+
+void getOpticalFlowPyramidPatch(InputArray _pts, const std::vector<cv::Mat> &imgPyr, std::vector<Patch> &pathes, Size winSize, int maxLevel);
+
+void affinePhotometricPyrLKT(const Mat &prevImg, const Mat & nextImg,
+                             InputArray _prevPts, InputOutputArray _nextPts,
+                             OutputArray _status, OutputArray _err,
+                             Size winSize, int maxLevel, int maxIter, float minEpslion,
+                             int flags, double maxResThreshold);
 
 }
