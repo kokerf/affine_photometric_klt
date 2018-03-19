@@ -21,6 +21,23 @@ typedef Matrix<float, 8, 1> Vector8f;
 typedef Matrix<float, 2, 2, RowMajor> Matrix2f;
 typedef Matrix<float, 8, 8, RowMajor> Matrix8f;
 
+struct HessianInvoker : ParallelLoopBody
+{
+
+    HessianInvoker(const Mat &_img, const Mat &_gx, const Mat &_gy, const Vector2f *_pts, Patch *_patches, Size _winSize, int _level, int _maxLevel);
+
+    void operator()(const Range &range) const;
+
+    const Mat *img;
+    const Mat *gx;
+    const Mat *gy;
+    const Vector2f *pts;
+    Patch *patches;
+    const Size winSize;
+    const int level;
+    const int maxLevel;
+};
+
 struct LKTInvoker : ParallelLoopBody
 {
 

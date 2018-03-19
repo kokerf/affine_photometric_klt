@@ -43,8 +43,10 @@ int main(int argc, char const *argv[])
     std::vector<cv::Point2f> pts_next;
     std::vector<uchar> status;
     std::vector<float> error;
+    double t0 = cv::getTickCount();
     KLT_Tracker::affinePhotometricPyrLKT(img1, img2, pts_prev, pts_next, status, error, cv::Size(21,21), 3, 30, 0.01, 0, 30);
-
+    double t1 = cv::getTickCount();
+    std::cout << "time: " << (t1-t0)/cv::getTickFrequency() << std::endl;
 
     cv::Mat show_dest;
     cv::cvtColor(img2, show_dest, CV_GRAY2RGB);

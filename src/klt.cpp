@@ -110,6 +110,7 @@ void LKTInvoker::operator()(const Range &range) const
 //        cv::imshow("I", I);
 //        cv::waitKey(0);
 
+        Vector8f prevDelta;
         int j;
         for(j = 0; j < maxIter; j++)
         {
@@ -142,6 +143,7 @@ void LKTInvoker::operator()(const Range &range) const
 //            cv::imshow("dest", dest);
 //            Mat src;
 //            T.convertTo(src, CV_8UC1);
+//            cv::imshow("src", src);
 //            cv::waitKey(0);
 
             Vector8f Jres; Jres.setZero();
@@ -179,15 +181,10 @@ void LKTInvoker::operator()(const Range &range) const
 
                         float diff = (1+alpha) * (Iptr[0] * iw00 + Iptr[1] * iw01 + Iptr[stepI] * iw10 + Iptr[1+stepI] * iw11) + beta - Tptr[c];
 
-                        res_sum += diff*diff;
-
                         Jres.noalias() += eigJcache.row(n) * diff;
                     }
                 }
             }
-
-
-//            std::cout << res_sum << ", Jres: " << Jres.transpose() << std::endl;
 
             Vector8f delta = eigHinv * Jres;
 
@@ -213,22 +210,98 @@ void LKTInvoker::operator()(const Range &range) const
             nextAffines[ptidx] << affine[0]-1.0f, affine[1], affine[2], affine[3]-1.0f;
             nextIllums[ptidx] << alpha, beta;
 
-//            Mat dest;
-//            cv::cvtColor(I, dest, CV_GRAY2RGB);
-//            Point2f lt(nextPt[0]-halfWin[0]-1, nextPt[1]-halfWin[0]-1);
-//            Point2f rb(nextPt[0]+halfWin[0]+1, nextPt[1]+halfWin[0]+1);
-//            cv::rectangle(dest, lt, rb, cv::Scalar(255,0,0));
-//            cv::imshow("dest", dest);
-//            Mat src;
-//            T.convertTo(src, CV_8UC1);
-//            cv::imshow("src", src);
-//
-//            waitKey(0);
-
             if(delta.dot(delta) <= minEpslion)
                 break;
 
+            if(j > 0 && std::abs(delta[4] + prevDelta[4]) < 0.01 &&
+                std::abs(delta[5] + prevDelta[5]) < 0.01)
+            {
+//                nextPts[ptidx] -= delta * 0.5f;
+                break;
+            }
+            prevDelta = delta;
+
         }
+    }
+}
+
+HessianInvoker::HessianInvoker(const Mat &_img, const Mat &_gx, const Mat &_gy, const Vector2f *_pts, Patch *_patches, Size _winSize, int _level, int _maxLevel):
+    img(&_img), gx(&_gx), gy(&_gy), pts(_pts), patches(_patches), winSize(_winSize), level(_level), maxLevel(_maxLevel)
+{}
+
+void HessianInvoker::operator()(const Range &range) const
+{
+    const Mat &Tsrc = *img;
+    const Mat &Tx = *gx;
+    const Mat &Ty = *gy;
+    assert(Tsrc.type() == CV_8UC1);
+    assert(Tx.type() == CV_32FC1);
+    assert(Ty.type() == CV_32FC1);
+
+    const Vector2f halfwin((winSize.width-1)*0.5, (winSize.width-1)*0.5);
+
+    for(int ptidx = range.start; ptidx < range.end; ptidx++)
+    {
+        Vector2f ptLevel = pts[ptidx] * (1.0f / (1 << level));
+        Patch &patch = patches[ptidx];
+        if(patch.patchPyr.size() != maxLevel)
+            patch.patchPyr.resize(maxLevel+1);
+        if(patch.Hinv.size() != maxLevel)
+            patch.Hinv.resize(maxLevel+1);
+        if(patch.Jcache.size() != maxLevel)
+            patch.Jcache.resize(maxLevel+1);
+
+        Mat &T = patch.patchPyr[level];
+        Mat &Hinv = patch.Hinv[level];
+        Mat &Jcache = patch.Jcache[level];
+
+        T = Mat::zeros(winSize, CV_32FC1);
+        Jcache= Mat::zeros(winSize.area(), 8, CV_32FC1);
+        Matrix<float, 8, 8, RowMajor> H;
+        Map<Matrix<float, Dynamic, Dynamic, RowMajor> > eigJcache((float*)Jcache.data, winSize.area(), 8);
+
+        Vector2i iptLevel;
+        ptLevel -= halfwin;
+        iptLevel[0] = cvRound(ptLevel[0]);
+        iptLevel[1] = cvRound(ptLevel[1]);
+
+        float a = ptLevel[0] - iptLevel[0];
+        float b = ptLevel[1] - iptLevel[1];
+        float iw00 = (1.f - a) * (1.f - b);
+        float iw01 = a * (1.f - b);
+        float iw10 = (1.f - a) * b;
+        float iw11 = 1- iw00 - iw01 - iw10;
+
+        const int stepI = (int)Tsrc.step / Tsrc.elemSize1();
+
+        int x, y;
+        int i = 0;
+        Vector8f J;
+        H.setZero();
+        for(y = 0; y < winSize.height; ++y)
+        {
+            const uchar *pI = Tsrc.ptr<uchar>(y + iptLevel[1]) + iptLevel[0];
+            const float *pdIx = Tx.ptr<float>(y + iptLevel[1]) + iptLevel[0];
+            const float *pdIy = Ty.ptr<float>(y + iptLevel[1]) + iptLevel[0];
+            float *pP = T.ptr<float>(y);
+
+            for(x = 0; x < winSize.width; ++x, ++i)
+            {
+                pP[x] = pI[x] * iw00 + pI[x + 1] * iw01 + pI[x + stepI] * iw10 + pI[x + stepI + 1] * iw11;
+                float dx = pdIx[x] * iw00 + pdIx[x + 1] * iw01 + pdIx[x + stepI] * iw10 + pdIx[x + stepI + 1] * iw11;
+                float dy = pdIy[x] * iw00 + pdIy[x + 1] * iw01 + pdIy[x + stepI] * iw10 + pdIy[x + stepI + 1] * iw11;
+
+                J << x * dx, y * dx, x * dy, y * dy, dx, dy, pP[x], 1;
+
+                H.noalias() += J * J.transpose();
+                eigJcache.row(i) = J;
+            }
+
+        }
+
+        Hinv = Mat::zeros(8, 8, CV_32FC1);
+        Map<Matrix<float, 8, 8, RowMajor> > eigHinv(Hinv.ptr<float>(0));
+        eigHinv = H.inverse();
     }
 }
 
@@ -239,10 +312,11 @@ void getOpticalFlowPyramidPatch(InputArray _pts, const std::vector<cv::Mat> &img
     CV_Assert((npoints = ptsMat.checkVector(2, CV_32F, true)) >= 0);
 
     assert(winSize.height%2 == 1 && winSize.width%2 == 1);
-    const cv::Point2f halfwin((winSize.width-1)*0.5, (winSize.width-1)*0.5);
+    const Point2f halfwin((winSize.width-1)*0.5, (winSize.width-1)*0.5);
 
-    std::vector<Mat> derivXPyr(imgPyr.size());
-    std::vector<Mat> derivYPyr(imgPyr.size());
+    const Point2f *pts = ptsMat.ptr<Point2f>();
+    pathes.resize(npoints);
+
     for(int l = 0; l <= maxLevel; ++l)
     {
         Size wholeSize;
@@ -252,107 +326,22 @@ void getOpticalFlowPyramidPatch(InputArray _pts, const std::vector<cv::Mat> &img
         CV_Assert(wholeSize.width == imgPyr[l].cols + 2*winSize.width && wholeSize.height == imgPyr[l].rows + 2*winSize.height);
 
         Size imgSize = imgPyr[l].size();
-        derivXPyr[l] = Mat::zeros(imgSize.height + winSize.height*2, imgSize.width + winSize.height*2, CV_32FC1);
-        derivYPyr[l] = Mat::zeros(imgSize.height + winSize.height*2, imgSize.width + winSize.height*2, CV_32FC1);
+        Mat _derivX = Mat::zeros(imgSize.height + winSize.height*2, imgSize.width + winSize.height*2, CV_32FC1);
+        Mat _derivY = Mat::zeros(imgSize.height + winSize.height*2, imgSize.width + winSize.height*2, CV_32FC1);
 
-        Mat derivX = derivXPyr[l](Rect(winSize.width, winSize.height, imgSize.width, imgSize.height));
-        Mat derivY = derivYPyr[l](Rect(winSize.width, winSize.height, imgSize.width, imgSize.height));
+        Mat derivX = _derivX(Rect(winSize.width, winSize.height, imgSize.width, imgSize.height));
+        Mat derivY = _derivY(Rect(winSize.width, winSize.height, imgSize.width, imgSize.height));
         const double scale = 1.0/32;
         Scharr(imgPyr[l], derivX, CV_32FC1, 1, 0, scale, 0);
         Scharr(imgPyr[l], derivY, CV_32FC1, 0, 1, scale, 0);
-        copyMakeBorder(derivX, derivXPyr[l], winSize.height, winSize.height, winSize.width, winSize.width, cv::BORDER_CONSTANT | cv::BORDER_ISOLATED);
-        copyMakeBorder(derivY, derivYPyr[l], winSize.height, winSize.height, winSize.width, winSize.width, cv::BORDER_CONSTANT | cv::BORDER_ISOLATED);
+        copyMakeBorder(derivX, _derivX, winSize.height, winSize.height, winSize.width, winSize.width, cv::BORDER_CONSTANT | cv::BORDER_ISOLATED);
+        copyMakeBorder(derivY, _derivY, winSize.height, winSize.height, winSize.width, winSize.width, cv::BORDER_CONSTANT | cv::BORDER_ISOLATED);
 
-        derivXPyr[l].adjustROI(-winSize.height, -winSize.height, -winSize.width, -winSize.width);
-        derivYPyr[l].adjustROI(-winSize.height, -winSize.height, -winSize.width, -winSize.width);
+        _derivX.adjustROI(-winSize.height, -winSize.height, -winSize.width, -winSize.width);
+        _derivY.adjustROI(-winSize.height, -winSize.height, -winSize.width, -winSize.width);
+
+        parallel_for_(Range(0, npoints), HessianInvoker(imgPyr[l], _derivX, _derivY, (Vector2f*)pts, pathes.data(), winSize, l, maxLevel));
     }
-
-    const Point2f *pts = ptsMat.ptr<Point2f>();
-    pathes.resize(npoints);
-    const cv::Point2f offset(winSize.height, winSize.width);
-    for(size_t n = 0; n < npoints; ++n)
-    {
-        std::vector<Mat> patches(maxLevel+1);
-        std::vector<Mat> Hessians(maxLevel+1);
-        std::vector<Mat> Jcaches(maxLevel+1);
-        const cv::Point2f pt = pts[n];
-        for(int l = 0; l <= maxLevel; ++l)
-        {
-            cv::Point2f ptLevel = pt * (1.0f / (1 << l));
-            patches[l] = Mat::zeros(winSize, CV_32FC1);
-            Jcaches[l] = Mat::zeros(winSize.area(), 8, CV_32FC1);
-            Matrix<float, 8, 8, RowMajor> H;
-            Map<Matrix<float, Dynamic, Dynamic, RowMajor> > Jcache((float*)Jcaches[l].data, winSize.area(), 8);
-
-            cv::Point2i iptLevel;
-            ptLevel -= halfwin;
-            iptLevel.x = cvRound(ptLevel.x);
-            iptLevel.y = cvRound(ptLevel.y);
-
-            float a = ptLevel.x - iptLevel.x;
-            float b = ptLevel.y - iptLevel.y;
-            float iw00 = (1.f - a) * (1.f - b);
-            float iw01 = a * (1.f - b);
-            float iw10 = (1.f - a) * b;
-            float iw11 = 1- iw00 - iw01 - iw10;
-
-            const int stepI = (int)(imgPyr[l].step / imgPyr[l].elemSize1());
-
-            int x, y;
-            int i = 0;
-            Vector8f J;
-            H.setZero();
-            for(y = 0; y < winSize.height; ++y)
-            {
-                const uchar *pI = imgPyr[l].ptr<uchar>(y + iptLevel.y) + iptLevel.x;
-                const float *pdIx = derivXPyr[l].ptr<float>(y + iptLevel.y) + iptLevel.x;
-                const float *pdIy = derivYPyr[l].ptr<float>(y + iptLevel.y) + iptLevel.x;
-                float *pP = patches[l].ptr<float>(y);
-
-                for(x = 0; x < winSize.width; ++x, ++i)
-                {
-                    pP[x] = pI[x] * iw00 + pI[x + 1] * iw01 + pI[x + stepI] * iw10 + pI[x + stepI + 1] * iw11;
-                    float dx = pdIx[x] * iw00 + pdIx[x + 1] * iw01 + pdIx[x + stepI] * iw10 + pdIx[x + stepI + 1] * iw11;
-                    float dy = pdIy[x] * iw00 + pdIy[x + 1] * iw01 + pdIy[x + stepI] * iw10 + pdIy[x + stepI + 1] * iw11;
-
-                    J << x * dx, y * dx, x * dy, y * dy, dx, dy, pP[x], 1;
-
-                    H.noalias() += J * J.transpose();
-                    Jcache.row(i) = J;
-                }
-
-            }
-
-            Hessians[l] = cv::Mat(8, 8, CV_32FC1);
-            Map<Matrix<float, 8, 8, RowMajor> > Hinv(Hessians[l].ptr<float>(0));
-            Hinv = H.inverse();
-
-
-//            std::cout << "pt: " << pt << "patch: \n" << patches[l] << ", l " << ptLevel<< std::endl;
-//            Mat src;
-//            cv::cvtColor(imgPyr[l], src, CV_GRAY2RGB);
-//            cv::rectangle(src, ptLevel-Point2f(1,1), ptLevel+halfwin*2+Point2f(1,1), cv::Scalar(255,0,0));
-//            cv::imshow("imgPyr", src);
-//            Mat temp;
-//            patches[l].convertTo(temp, CV_8UC1);
-//            imshow("patch", temp);
-//            waitKey(0);
-        }
-
-        pathes[n].patchPyr = patches;
-        pathes[n].Hinv = Hessians;
-        pathes[n].Jcache = Jcaches;
-
-//        if(n == 1)
-//        {
-//            std::cout << "pt: " << pt << "patch: \n" << patches[0] << std::endl;
-//            cv::Mat temp;
-//            patches[maxLevel].convertTo(temp, CV_8UC1);
-//            cv::imshow("patches[maxLevel]", temp);
-//            cv::waitKey(0);
-//        }
-    }
-
 }
 
 void affinePhotometricPyrLKT(const Mat &prevImg, const Mat & nextImg,
