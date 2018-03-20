@@ -2,6 +2,14 @@
 #include <opencv2/opencv.hpp>
 #include "src/klt.hpp"
 
+template <typename T>
+std::string to_string(T val)
+{
+    std::stringstream stream;
+    stream << val;
+    return stream.str();
+}
+
 int main(int argc, char const *argv[])
 {
     if(argc != 3)
@@ -16,8 +24,8 @@ int main(int argc, char const *argv[])
     cv::Mat img1 = cv::imread(img_str1, CV_LOAD_IMAGE_GRAYSCALE);
     cv::Mat img2 = cv::imread(img_str2, CV_LOAD_IMAGE_GRAYSCALE);
 
-    cv::imshow("img1", img1);
-    cv::imshow("img2", img2);
+//    cv::imshow("img1", img1);
+//    cv::imshow("img2", img2);
 
     std::vector<cv::Point2f> pts_prev;
     cv::goodFeaturesToTrack(img1, pts_prev, 100, 0.01, 5);
@@ -27,6 +35,9 @@ int main(int argc, char const *argv[])
     for(size_t i = 0; i < pts_prev.size(); i++)
     {
         cv::circle(show, pts_prev[i], 3, cv::Scalar(255, 0, 0));
+        std::string id_str;
+        id_str = to_string<size_t>(i);
+        cv::putText(show, id_str, pts_prev[i]-cv::Point2f(1,1), 1, 0.5, cv::Scalar(0, 255, 0));
     }
 
     cv::imshow("show", show);
@@ -38,13 +49,13 @@ int main(int argc, char const *argv[])
     std::vector<cv::Mat> imgPyr;
     cv::buildOpticalFlowPyramid(img1, imgPyr, cv::Size(21,21), 3, false);
 
-    KLT_Tracker::getOpticalFlowPyramidPatch(pts_prev, imgPyr, pathes, cv::Size(21,21), 3);
+//    KLT_Tracker::getOpticalFlowPyramidPatch(pts_prev, imgPyr, pathes, cv::Size(21,21), 3);
 
     std::vector<cv::Point2f> pts_next;
     std::vector<uchar> status;
     std::vector<float> error;
     double t0 = cv::getTickCount();
-    KLT_Tracker::affinePhotometricPyrLKT(img1, img2, pts_prev, pts_next, status, error, cv::Size(21,21), 3, 30, 0.01, 0, 30);
+    KLT_Tracker::affinePhotometricPyrLKT(img1, img2, pts_prev, pts_next, status, error, cv::Size(35,35), 3, 30, 0.01, 0, 30);
     double t1 = cv::getTickCount();
     std::cout << "time: " << (t1-t0)/cv::getTickFrequency() << std::endl;
 
@@ -56,6 +67,9 @@ int main(int argc, char const *argv[])
             continue;
 
         cv::circle(show_dest, pts_next[i], 3, cv::Scalar(255, 0, 0));
+        std::string id_str;
+        id_str = to_string<size_t>(i);
+        cv::putText(show_dest, id_str, pts_next[i]-cv::Point2f(1,1), 1, 0.5, cv::Scalar(0, 255, 0));
     }
 
     cv::imshow("dest", show_dest);
